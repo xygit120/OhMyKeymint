@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::LocalKey;
 
@@ -165,7 +167,26 @@ where
     })
 }
 
+static AAID_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u32, Vec<u8>>>> = std::sync::OnceLock::new();
+static AAID_FETCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
+    let cache_mutex = AAID_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    if let std::result::Result::Ok(guard) = cache_mutex.lock() {
+        if let Some(cached) = guard.get(&uid) {
+            return std::result::Result::Ok(cached.clone());
+        }
+    }
+
+    let _fetch_guard = AAID_FETCH_LOCK.lock().unwrap();
+
+    if let std::result::Result::Ok(guard) = cache_mutex.lock() {
+        if let Some(cached) = guard.get(&uid) {
+            return std::result::Result::Ok(cached.clone());
+        }
+    }
+
     debug!("Getting AAID for UID: {}", uid);
     let application_id = if (uid == 0) || (uid == 1000) {
         let info = KeyAttestationPackageInfo {
@@ -177,56 +198,16 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
             packageInfos: vec![info],
         }
     } else {
-        get_application_id_from_provider(uid)?
+        super::legacy::get_application_id(uid)?
     };
 
-    debug!("Application ID: {:?}", application_id);
+    let encoded = encode_application_id(application_id)?;
 
-    encode_application_id(application_id)
-}
-
-fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationApplicationId> {
-    let _wd = crate::watchdog::watch("get_aaid: Retrieving AAID by calling service");
-    let use_legacy = super::legacy::should_use_aaid_provider();
-    let mut tried = 0;
-    loop {
-        let result = if use_legacy {
-            super::legacy::get_application_id(uid)
-        } else {
-            let pm = get_pm()?;
-            let current_uid = unsafe { libc::getuid() };
-            let current_euid = unsafe { libc::geteuid() };
-            debug!("Current UID: {}, EUID: {}", current_uid, current_euid);
-            pm.getKeyAttestationApplicationId(uid as i32)
-                .map_err(anyhow::Error::new)
-        };
-
-        match result {
-            Result::Ok(application_id) => return Ok(application_id),
-            Err(error) => {
-                if is_transaction_failed_error(&error) && tried < 2 {
-                    error!("Transaction failed when calling getKeyAttestationApplicationId for UID {}: {:?}", uid, error);
-                    error!("Trying to reset the PM instance to None");
-                    if use_legacy {
-                        super::legacy::clear_provider_cache();
-                    } else {
-                        reset_pm();
-                    }
-                    tried += 1;
-                } else if is_get_attestation_application_id_failed(&error) {
-                    return Err(anyhow::anyhow!(KsError::Rc(
-                        ResponseCode::GET_ATTESTATION_APPLICATION_ID_FAILED
-                    )));
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Failed to get KeyAttestationApplicationId for UID {}, Error: {:?}",
-                        uid,
-                        error
-                    ));
-                }
-            }
-        }
+    if let std::result::Result::Ok(mut guard) = cache_mutex.lock() {
+        guard.insert(uid, encoded.clone());
     }
+
+    std::result::Result::Ok(encoded)
 }
 
 fn is_transaction_failed_error(error: &anyhow::Error) -> bool {
