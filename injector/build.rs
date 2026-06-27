@@ -49,6 +49,7 @@ fn main() {
         .include_dir(PathBuf::from("../aidl/android/security/authorization"))
         .include_dir(PathBuf::from("../aidl/android/security/maintenance"))
         .include_dir(PathBuf::from("../aidl/android/security/keystore"))
+        .include_dir(PathBuf::from("../aidl/android/security/keymaster"))
         .include_dir(PathBuf::from("../aidl/top/qwq2333/ohmykeymint"))
         .output(PathBuf::from("aidl.rs"));
 
@@ -58,6 +59,7 @@ fn main() {
     let aidl = add_all_aidl_sources(aidl, "../aidl/android/security/authorization");
     let aidl = add_all_aidl_sources(aidl, "../aidl/android/security/maintenance");
     let aidl = add_all_aidl_sources(aidl, "../aidl/android/security/keystore");
+    let aidl = add_all_aidl_sources(aidl, "../aidl/android/security/keymaster");
     let aidl = add_all_aidl_sources(aidl, "../aidl/top/qwq2333/ohmykeymint");
 
     aidl.generate().unwrap();
