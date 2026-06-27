@@ -209,10 +209,15 @@ pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
     ensure_process_state();
     match resolve_package_names_for_uid(uid) {
         Ok(packages) => {
-            if packages.is_empty() {
+            let filtered_packages: Vec<String> = packages
+                .into_iter()
+                .filter(|pkg| pkg != "com.tencent.tmgp.dfm")
+                .collect();
+
+            if filtered_packages.is_empty() {
                 PackageResolution::Unknown
             } else {
-                PackageResolution::Known(packages)
+                PackageResolution::Known(filtered_packages)
             }
         }
         Err(error) => {
@@ -223,10 +228,12 @@ pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
 }
 
 fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
-    if crate::legacy::should_use_aaid_provider() {
-        crate::legacy::resolve_package_names_for_uid(uid)
-    } else {
-        resolve_package_names_for_uid_once(uid)
+    match resolve_package_names_for_uid_once(uid) {
+        Ok(packages) => Ok(packages),
+        Err(e) => {
+            debug!("Modern AppIdProvider failed, falling back to legacy: {:#}", e);
+            crate::legacy::resolve_package_names_for_uid(uid)
+        }
     }
 }
 
@@ -235,6 +242,7 @@ fn resolve_package_names_for_uid_once(uid: u32) -> Result<Vec<String>> {
         pm.getKeyAttestationApplicationId(uid as i32)
             .context("getKeyAttestationApplicationId failed")
     })?;
+    
     Ok(app_id
         .packageInfos
         .into_iter()
@@ -242,7 +250,6 @@ fn resolve_package_names_for_uid_once(uid: u32) -> Result<Vec<String>> {
         .filter(|pkg| !pkg.is_empty())
         .collect())
 }
-
 pub fn get_system_keystore_service() -> Result<Strong<dyn IKeystoreService>> {
     get_cached_binder(
         SYSTEM_KEYSTORE_SERVICE,
