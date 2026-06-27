@@ -228,28 +228,9 @@ pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
 }
 
 fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
-    match resolve_package_names_for_uid_once(uid) {
-        Ok(packages) => Ok(packages),
-        Err(e) => {
-            debug!("Modern AppIdProvider failed, falling back to legacy: {:#}", e);
-            crate::legacy::resolve_package_names_for_uid(uid)
-        }
-    }
+    crate::legacy::resolve_package_names_for_uid(uid)
 }
 
-fn resolve_package_names_for_uid_once(uid: u32) -> Result<Vec<String>> {
-    let app_id = with_pm_retry(|pm| {
-        pm.getKeyAttestationApplicationId(uid as i32)
-            .context("getKeyAttestationApplicationId failed")
-    })?;
-    
-    Ok(app_id
-        .packageInfos
-        .into_iter()
-        .map(|pkg| pkg.packageName)
-        .filter(|pkg| !pkg.is_empty())
-        .collect())
-}
 pub fn get_system_keystore_service() -> Result<Strong<dyn IKeystoreService>> {
     get_cached_binder(
         SYSTEM_KEYSTORE_SERVICE,
