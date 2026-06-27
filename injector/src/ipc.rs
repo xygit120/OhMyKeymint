@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
 use std::cell::RefCell;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
@@ -222,25 +224,32 @@ pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
     }
 }
 
-fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
-    if crate::legacy::should_use_aaid_provider() {
-        crate::legacy::resolve_package_names_for_uid(uid)
-    } else {
-        resolve_package_names_for_uid_once(uid)
-    }
-}
+static PKG_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u32, Vec<String>>>> = std::sync::OnceLock::new();
+static PKG_FETCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn resolve_package_names_for_uid_once(uid: u32) -> Result<Vec<String>> {
-    let app_id = with_pm_retry(|pm| {
-        pm.getKeyAttestationApplicationId(uid as i32)
-            .context("getKeyAttestationApplicationId failed")
-    })?;
-    Ok(app_id
-        .packageInfos
-        .into_iter()
-        .map(|pkg| pkg.packageName)
-        .filter(|pkg| !pkg.is_empty())
-        .collect())
+fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
+    let cache_mutex = PKG_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    
+    if let std::result::Result::Ok(guard) = cache_mutex.lock() {
+        if let Some(cached) = guard.get(&uid) {
+            return std::result::Result::Ok(cached.clone());
+        }
+    }
+
+    let _fetch_guard = PKG_FETCH_LOCK.lock().unwrap();
+
+    if let std::result::Result::Ok(guard) = cache_mutex.lock() {
+        if let Some(cached) = guard.get(&uid) {
+            return std::result::Result::Ok(cached.clone());
+        }
+    }
+
+    let pkgs = crate::legacy::resolve_package_names_for_uid(uid)?;
+    if let std::result::Result::Ok(mut guard) = cache_mutex.lock() {
+        guard.insert(uid, pkgs.clone());
+    }
+
+    std::result::Result::Ok(pkgs)
 }
 
 pub fn get_system_keystore_service() -> Result<Strong<dyn IKeystoreService>> {
