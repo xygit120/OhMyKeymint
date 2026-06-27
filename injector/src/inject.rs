@@ -240,7 +240,6 @@ fn validate_received_remote_fd(
             break;
         }
 
-        // 寻找包含我们要的 FD 的 SCM_RIGHTS 块
         if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
             let data_offset = offset + unsafe { libc::CMSG_LEN(0) as usize };
             let data_end = data_offset + size_of::<libc::c_int>();
@@ -257,15 +256,15 @@ fn validate_received_remote_fd(
                 bail!("remote payload fd unexpectedly matches the remote socket fd");
             }
 
-            return Ok(fd); 
+            return Ok(fd);
         }
         
-        offset += unsafe { libc::CMSG_ALIGN(header.cmsg_len as u32) as usize };
+        let align_size = std::mem::size_of::<usize>();
+        offset += (header.cmsg_len + align_size - 1) & !(align_size - 1);
     }
 
     bail!("SCM_RIGHTS not found in the received control buffer");
 }
-
 fn send_fd_to_remote<F, G, H>(
     pid: Pid,
     local_fd: RawFd,
