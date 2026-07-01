@@ -313,21 +313,16 @@ where
     }
 
     let cmsg_space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) as usize };
-    let remote_cmsg_alloc = 256usize; 
-    let remote_cmsg_bytes = vec![0u8; remote_cmsg_alloc];
-    let remote_cmsg_ptr = push_to_remote_stack(&remote_cmsg_bytes)?;
     
-    let remote_payload_storage = push_to_remote_stack(&[0u8])?;
-    let remote_iov = libc::iovec {
-        iov_base: remote_payload_storage as *mut c_void,
-        iov_len: 1,
+    // 【修复1】：采用 16 个 usize (128字节) 的安全静态数组，彻底解决 ARM64 内存对齐导致的崩溃
+    let remote_cmsg_alloc = 128usize; 
+    let remote_cmsg_storage = [0usize; 16]; 
+    let remote_cmsg_bytes = unsafe {
+        std::slice::from_raw_parts(remote_cmsg_storage.as_ptr() as *const u8, remote_cmsg_alloc)
     };
-    let remote_iov_bytes = unsafe {
-        std::slice::from_raw_parts(&remote_iov as *const _ as *const u8, size_of::<libc::iovec>())
-    };
-    let remote_iov_ptr = push_to_remote_stack(remote_iov_bytes)?;
-
+    let remote_cmsg_ptr = push_to_remote_stack(remote_cmsg_bytes)?;
     
+    // 【修复2】：删除了多余的重复代码，只保留一次入栈
     let remote_payload_storage = push_to_remote_stack(&[0u8])?;
     let remote_iov = libc::iovec {
         iov_base: remote_payload_storage as *mut c_void,
@@ -371,6 +366,7 @@ where
     local_hdr.msg_iovlen = 1;
     local_hdr.msg_control = local_cmsg_storage.as_mut_ptr() as *mut c_void;
     local_hdr.msg_controllen = cmsg_space; 
+    
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&local_hdr);
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
@@ -416,7 +412,6 @@ where
     close_remote(remote_socket)?;
     Ok(fd)
 }
-
 fn check_rpc_ready_once() -> Result<()> {
     let session = RpcSession::setup_unix_client_android13plus(rpc::SOCKET, rpc::WIRE_MAX_VERSION)
         .context("failed to connect to OMK RPC socket")?;
