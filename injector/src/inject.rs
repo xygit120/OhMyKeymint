@@ -327,6 +327,17 @@ where
     };
     let remote_iov_ptr = push_to_remote_stack(remote_iov_bytes)?;
 
+    
+    let remote_payload_storage = push_to_remote_stack(&[0u8])?;
+    let remote_iov = libc::iovec {
+        iov_base: remote_payload_storage as *mut c_void,
+        iov_len: 1,
+    };
+    let remote_iov_bytes = unsafe {
+        std::slice::from_raw_parts(&remote_iov as *const _ as *const u8, size_of::<libc::iovec>())
+    };
+    let remote_iov_ptr = push_to_remote_stack(remote_iov_bytes)?;
+
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = remote_iov_ptr as *mut libc::iovec;
     msg.msg_iovlen = 1;
