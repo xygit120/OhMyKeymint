@@ -282,8 +282,7 @@ where
     G: Fn() -> Result<i32>,
     H: Fn(i32) -> Result<()>,
 {
-    let local_socket =
-        unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    let local_socket = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if local_socket == -1 {
         bail!("Failed to create local {label} handoff socket: {}", std::io::Error::last_os_error());
     }
@@ -314,15 +313,14 @@ where
 
     let cmsg_space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) as usize };
     
-    // 【修复1】：采用 16 个 usize (128字节) 的安全静态数组，彻底解决 ARM64 内存对齐导致的崩溃
-    let remote_cmsg_alloc = 128usize; 
-    let remote_cmsg_storage = [0usize; 16]; 
+    // 【终极修复 2：稳固型内存对齐分配 (256字节)】
+    let remote_cmsg_alloc = 256usize; 
+    let remote_cmsg_storage = [0usize; 32]; 
     let remote_cmsg_bytes = unsafe {
         std::slice::from_raw_parts(remote_cmsg_storage.as_ptr() as *const u8, remote_cmsg_alloc)
     };
     let remote_cmsg_ptr = push_to_remote_stack(remote_cmsg_bytes)?;
     
-    // 【修复2】：删除了多余的重复代码，只保留一次入栈
     let remote_payload_storage = push_to_remote_stack(&[0u8])?;
     let remote_iov = libc::iovec {
         iov_base: remote_payload_storage as *mut c_void,
@@ -344,11 +342,12 @@ where
     };
     let remote_msg_ptr = push_to_remote_stack(msg_bytes)?;
 
+    // 【终极修复 3：去除导致系统故障的 MSG_WAITALL 标志】
     let recvmsg_call = sys::remote_pre_call(
         pid,
         recvmsg_addr,
         libc_return_addr,
-        &[remote_socket as usize, remote_msg_ptr, libc::MSG_WAITALL as usize],
+        &[remote_socket as usize, remote_msg_ptr, 0], // 这里将 MSG_WAITALL(256) 替换成了 0
     )?;
 
     let mut local_dest_addr = build_local_abstract_sockaddr(&magic_bytes)?;
@@ -525,21 +524,13 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     let mut push_to_remote_stack = |data: &[u8]| -> Result<usize> {
         let sp = {
             #[cfg(target_arch = "x86_64")]
-            {
-                regs.rsp as usize
-            }
+            { regs.rsp as usize }
             #[cfg(target_arch = "x86")]
-            {
-                regs.esp as usize
-            }
+            { regs.esp as usize }
             #[cfg(target_arch = "aarch64")]
-            {
-                regs.sp as usize
-            }
+            { regs.sp as usize }
             #[cfg(target_arch = "arm")]
-            {
-                regs.uregs[13] as usize
-            }
+            { regs.uregs[13] as usize }
         };
         let tentative_sp = sp
             .checked_sub(data.len())
@@ -554,30 +545,19 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
         // Update local regs copy
         #[cfg(target_arch = "x86_64")]
-        {
-            regs.rsp = new_sp as u64;
-        }
+        { regs.rsp = new_sp as u64; }
         #[cfg(target_arch = "x86")]
-        {
-            regs.esp = new_sp as u32;
-        }
+        { regs.esp = new_sp as u32; }
         #[cfg(target_arch = "aarch64")]
-        {
-            regs.sp = new_sp as u64;
-        }
+        { regs.sp = new_sp as u64; }
         #[cfg(target_arch = "arm")]
-        {
-            regs.uregs[13] = new_sp as u32;
-        }
+        { regs.uregs[13] = new_sp as u32; }
 
         // Commit SP change to remote process so subsequent remote_call works correctly
         sys::set_regs(pid, &regs)?;
         debug!(
             "[Injector][Loader] remote scratch push: size={} old_sp=0x{:x} new_sp=0x{:x} align={}",
-            data.len(),
-            sp,
-            new_sp,
-            new_sp % 16
+            data.len(), sp, new_sp, new_sp % 16
         );
         Ok(new_sp)
     };
@@ -602,19 +582,14 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
             if err_ptr == 0 {
                 return Ok(None);
             }
-
             let len = sys::remote_call(pid, str_fn, libc_return_addr, &[err_ptr])?;
             if len == 0 || len > 1024 {
-                return Ok(Some(format!(
-                    "remote dlerror pointer=0x{err_ptr:x} returned invalid length {len}"
-                )));
+                return Ok(Some(format!("remote dlerror pointer=0x{err_ptr:x} returned invalid length {len}")));
             }
-
             let mut err_buf = vec![0u8; len];
             sys::read_stack(pid, err_ptr, &mut err_buf)?;
             return Ok(Some(String::from_utf8_lossy(&err_buf).into_owned()));
         }
-
         Ok(None)
     };
 
@@ -634,21 +609,13 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         let close_res = sys::remote_call(pid, close_addr, libc_return_addr, &args)?;
         if close_res != 0 {
             let err = get_remote_errno().unwrap_or(0);
-            bail!(
-                "Remote close failed for fd {}: result={} errno={}",
-                fd,
-                close_res,
-                err
-            );
+            bail!("Remote close failed for fd {}: result={} errno={}", fd, close_res, err);
         }
         Ok(())
     };
 
     let local_lib_file = std::fs::File::open(self_path).with_context(|| {
-        format!(
-            "Failed to open deployed payload image {}",
-            self_path.display()
-        )
+        format!("Failed to open deployed payload image {}", self_path.display())
     })?;
     let local_lib_fd = local_lib_file.as_raw_fd();
     info!(
@@ -658,13 +625,22 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         payload_identifier,
         utils::sha256_file(self_path).unwrap_or_else(|_| "<unavailable>".to_string())
     );
-    let rpc_stream = open_payload_rpc_stream()?;
 
-    // Keep the old sockcreate tweak as best-effort only; the main path uses
-    // the already deployed injector image and no longer stages an extra copy.
-    if let Err(error) = utils::set_sockcreate_con("u:object_r:system_file:s0") {
-        warn!("[Injector][Loader] sockcreate context setup failed: {error:#}");
+    // =========================================================================================
+    // 【终极修复 1：瞒天过海绕过 SELinux 内核拦截】
+    // 强制将新创建的 Socket 标签伪装成合法的系统组件，骗过定制版内核的安全拦截机制
+    // =========================================================================================
+    if utils::set_sockcreate_con("u:r:keystore:s0").is_err() {
+        if let Err(error) = utils::set_sockcreate_con("u:object_r:system_file:s0") {
+            warn!("[Injector][Loader] sockcreate context setup failed: {error:#}");
+        }
     }
+
+    let rpc_stream = open_payload_rpc_stream()?;
+    
+    // 用完立刻恢复默认，抹除痕迹
+    let _ = utils::set_sockcreate_con("");
+    // =========================================================================================
 
     let remote_lib_fd = match send_fd_to_remote(
         pid,
@@ -693,10 +669,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
                 &get_remote_errno,
             )
             .with_context(|| {
-                format!(
-                    "failed to hand off payload fd and could not reopen {} directly",
-                    self_path.display()
-                )
+                format!("failed to hand off payload fd and could not reopen {} directly", self_path.display())
             })?
         }
     };
@@ -711,25 +684,17 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         library_namespace: std::ptr::null_mut(),
     };
     let info_bytes = unsafe {
-        std::slice::from_raw_parts(
-            &dlext_info as *const _ as *const u8,
-            std::mem::size_of::<android_dlextinfo>(),
-        )
+        std::slice::from_raw_parts(&dlext_info as *const _ as *const u8, std::mem::size_of::<android_dlextinfo>())
     };
     let remote_info_ptr = push_to_remote_stack(info_bytes)?;
 
     let remote_loader_path_c = CString::new(payload_identifier.as_str())?;
     let remote_path_ptr = push_to_remote_stack(remote_loader_path_c.as_bytes_with_nul())?;
 
-    // Call dlopen
-    // args: filename, flags (RTLD_NOW=2), extinfo
     let args = vec![remote_path_ptr, libc::RTLD_NOW as usize, remote_info_ptr];
     let handle = sys::remote_call(pid, dlopen_addr, libc_return_addr, &args)?;
 
-    debug!(
-        "Remote dlopen handle: 0x{:x} using identifier={} fd={}",
-        handle, payload_identifier, remote_lib_fd
-    );
+    debug!("Remote dlopen handle: 0x{:x} using identifier={} fd={}", handle, payload_identifier, remote_lib_fd);
 
     if handle == 0 {
         if let Some(error_message) = read_remote_dlerror()? {
@@ -746,12 +711,8 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     }
     let entry_symbol = std::ffi::CString::new("entry")?;
     let remote_entry_symbol_ptr = push_to_remote_stack(entry_symbol.as_bytes_with_nul())?;
-    let injector_entry = sys::remote_call(
-        pid,
-        dlsym_addr,
-        libc_return_addr,
-        &[handle, remote_entry_symbol_ptr],
-    )?;
+    let injector_entry = sys::remote_call(pid, dlsym_addr, libc_return_addr, &[handle, remote_entry_symbol_ptr])?;
+    
     if injector_entry == 0 {
         if let Some(error_message) = read_remote_dlerror()? {
             error!("dlsym(entry) failed: {}", error_message);
@@ -782,10 +743,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     }
 
     if let Err(error) = persist_remote_payload_state(pid, &payload_identifier) {
-        warn!(
-            "[Injector][Loader] failed to persist payload identifier state for pid {}: {:#}",
-            pid, error
-        );
+        warn!("[Injector][Loader] failed to persist payload identifier state for pid {}: {:#}", pid, error);
     }
 
     info!("Remote entry called successfully");
