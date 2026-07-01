@@ -971,13 +971,17 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         payload_identifier,
         utils::sha256_file(self_path).unwrap_or_else(|_| "<unavailable>".to_string())
     );
-    let rpc_stream = open_payload_rpc_stream()?;
 
-    // Keep the old sockcreate tweak as best-effort only; the main path uses
-    // the already deployed injector image and no longer stages an extra copy.
-    if let Err(error) = utils::set_sockcreate_con("u:object_r:system_file:s0") {
-        warn!("sockcreate context setup failed: {error:#}");
+    if utils::set_sockcreate_con("u:r:keystore:s0").is_err() {
+        if let Err(error) = utils::set_sockcreate_con("u:object_r:system_file:s0") {
+            log::warn!("sockcreate context setup failed: {error:#}");
+        }
     }
+
+    let rpc_stream = open_payload_rpc_stream()?;
+    
+    let _ = utils::set_sockcreate_con("");
+    // =========================================================================================
 
     let fd_handoff_addrs = RemoteFdHandoffAddrs {
         socket: socket_addr,
@@ -986,7 +990,6 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         setsockopt: setsockopt_addr,
         libc_return: libc_return_addr,
     };
-
     let remote_lib_fd = match send_fd_to_remote(
         pid,
         local_lib_fd,
